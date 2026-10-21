@@ -1,0 +1,124 @@
+1. .env + config.json
+
+
+🔹 utils/config_loader.py
+→ load .env + config.json
+
+🔹 utils/data_loader.py
+→ load transcripts
+
+🔹 utils/llm_loader.py
+→ initialize LLM (OpenAI/Gemini)
+
+🔹 src/components/classification.py
+
+🔹 src/pipeline/pipeline.py
+
+🔹 src/components/evaluation.py
+🔹 src/pipeline/pipeline.py
+
+
+🔹 src/components/reporting.py
+🔹 src/pipeline/pipeline.py
+
+🔹 src/utils/helpers.py
+🔹 src/components/router.py
+🔹 main.py.py
+
+--------------------------------------
+
+=== App Serving Steps ===
+🧪 STEP 1 — Create src/pipeline/inference.py
+🧪 Create: app.py (ROOT LEVEL)
+🧪 STEP 3 — Update requirements.txt
+fastapi
+uvicorn
+python-multipart
+
+🧪 STEP 4 — Terminal Command: uvicorn app:app --reload
+http://127.0.0.1:8000/docs
+
+--------------------------------------
+
+=== App Deployment Steps ===
+
+**********************************************************************************************************
+1. Make sure your .gitignore includes:
+---
+.env
+__pycache__/
+*.pyc
+logs/
+data/
+.vscode/
+---
+
+2. Update app.py Slightly:
+    > Add on the top -> from fastapi.middleware.cors import CORSMiddleware
+    > After creating the FastAPI isntance as app, add -> 
+    ------------------------------
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    ------------------------------
+
+3. Ensure data/ Exists Automatically, Inside app.py, after imports add:    
+os.makedirs("data", exist_ok=True)
+-------------------------------------
+Why?
+Because containers start fresh.
+
+Without this:
+> file saving may fail
+> uploads may crash
+-------------------------------------
+
+4. Run this locally once: "uvicorn app:app --host 0.0.0.0 --port 8000"
+
+**********************************************************************************************************
+
+5. Create .dockerignore:
+------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.vscode
+logs/
+data/
+------------------------
+
+6. Create Dockerfile:
+------------------------
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN mkdir -p data logs
+EXPOSE 8000
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+------------------------
+
+7. Build docker image -> "docker build -t qa-evaluator-app ."
+**Important before build** -> .env file should not have any whitespace otherwise you'll see below error:
+=== docker: poorly formatted environment: variable 'OPENAI_API_KEY ' contains whitespaces. ===
+
+8. Run -> "docker images" & You should see -> "qa-evaluator-app"
+
+9. Run Container Locally -> "docker run -p 8000:8000 --env-file .env qa-evaluator-app"
+---
+* "-p 8000:8000" means -> HOST_PORT : CONTAINER_PORT
+* Traffic flow -> [Browser → localhost:8000 → Docker Container → FastAPI]
+* VERY Important Concept -> "--env-file .env" Injects environment variables into container.
+---
+
+10. Validate Application -> http://localhost:8000/docs
+
+**********************************************************************************************************

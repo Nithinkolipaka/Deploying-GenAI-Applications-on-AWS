@@ -1,0 +1,251 @@
+=== App Deployment Steps ===
+
+**********************************************************************************************************
+1. 
+
+2. Update app.py Slightly:
+    > Add on the top -> from fastapi.middleware.cors import CORSMiddleware
+    > After creating the FastAPI isntance as app, add -> 
+    ------------------------------
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    ------------------------------
+
+3. Ensure data/ Exists Automatically, Inside app.py, after imports add:    
+os.makedirs("data", exist_ok=True)
+-------------------------------------
+Why?
+Because containers start fresh.
+
+Without this:
+> file saving may fail
+> uploads may crash
+-------------------------------------
+
+4. Run this locally once: "uvicorn app:app --host 0.0.0.0 --port 8000"
+
+**********************************************************************************************************
+
+5. Create .dockerignore:
+------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.vscode
+logs/
+data/
+------------------------
+
+6. Create Dockerfile:
+------------------------
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN mkdir -p data logs
+EXPOSE 8000
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+------------------------
+
+7. Build docker image -> "docker build -t qa-evaluator-app ."
+**Important before build** -> .env file should not have any whitespace otherwise you'll see below error:
+=== docker: poorly formatted environment: variable 'OPENAI_API_KEY ' contains whitespaces. ===
+
+8. Run -> "docker images" & You should see -> "qa-evaluator-app"
+
+9. Run Container Locally -> "docker run -p 8000:8000 --env-file .env qa-evaluator-app"
+---
+* "-p 8000:8000" means -> HOST_PORT : CONTAINER_PORT
+* Traffic flow -> [Browser → localhost:8000 → Docker Container → FastAPI]
+* VERY Important Concept -> "--env-file .env" Injects environment variables into container.
+---
+
+10. Validate Application -> http://localhost:8000/docs
+
+**********************************************************************************************************
+
+11. Run "aws --version" and verify it existence, install it from google if using for first time
+
+12. Create New IAM User - "ecs-deployment-user" | Attach Permissions - AdministratorAccess
+
+13. Create Access Key:
+Inside IAM user -> Security Credentials -> Create Access Key -> Command Line Interface (CLI) -> save key-pass
+
+14. Configure AWS CLI Locally:
+Command -> aws configure
+
+15. Validate Authentication -> "aws sts get-caller-identity"
+
+16. Create ECR Repository:
+Go to: Amazon ECR Console -> Private Repo -> name: "qa-evaluator-app" -> Create repository -> Save URI
+
+17. Authenticate Docker with ECR:
+aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin <YOUR_ECR_URI>
+
+Expected Output - Login Succeeded
+
+18. Currently our image is: qa-evaluator-app (& Now we tag it for ECR)
+Run -> "docker tag qa-evaluator-app:latest <ECR_URI>:latest"
+
+19. Push Image to ECR:
+Run -> docker push <ECR_URI>:latest
+Expected Result -> latest: digest: sha256:...
+
+---------------
+**If you get error**: [denied: Your authorization token has expired. Reauthenticate and try again.]
+
+# 1. Re-authenticate to your us-east-1 ECR registry
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <ECR_URI>
+
+"Please exclude the ECR name from URI"
+Instead of [......xxxxxx.dkr.ecr.us-east-1.amazonaws.com/qa-evaluator-app]
+You do - [......xxxxxx.dkr.ecr.us-east-1.amazonaws.com]
+
+# 2. Immediately push your image while the token is fresh
+docker push <ECR_URI>:latest
+---------------
+
+20. Verify Inside ECR, Refresh ECR console & you should see:
+- image
+- latest tag
+- pushed timestamp
+
+**********************************************************************************************************
+
+Create a Service-Linked Role before proceeding (AWS services sometimes need permission to manage other AWS resources on your behalf.)
+Run -> "aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com"
+
+21. Create ECS Cluster using Fargate - basically we will create the infrastructure where containers will run.
+Before doing anything, understand these 4 components:
+
+--------------------------------------------------------
+ECS Cluster <<==>>	Logical container environment
+Task Definition <<==>>	Blueprint/configuration of container
+Task <<==>>	Running instance of container
+Service <<==>>	Keeps tasks alive automatically
+--------------------------------------------------------
+
+Fargate vs EC2 -> Normally ECS can run containers on: "EC2 servers" OR "Fargate", we are choosing "AWS Fargate" because:
+[no server management, easier to get started, cleaner deployment, production friendly]
+
+What we will do in this step:
+
+- Create ECS cluster
+- Understand VPC/networking basics
+- Prepare cluster for Fargate tasks
+
+No containers deployed yet.
+
+22. Go to Amazon ECS Console -> Create Cluster -> Name - "qa-evaluator-cluster" -> For Infra choose: AWS Fargate (serverless) -> Leave everything else to default -> Wait until: Status = Active
+
+
+23. Create ECS Task Definition - Goal of this step is to define how our container should run.
+Task Definition = Blueprint
+
+It defines:
+- which Docker image to run
+- CPU/memory allocation
+- container port
+- environment variables
+- runtime configuration
+
+What We Will Configure
+- Fargate runtime
+- CPU & memory
+- ECR image
+- Port mapping
+- Environment variables
+- Logging
+
+Go to "Amazon ECS Task Definitions Console" -> Click "Create new task definition" -> Task Definition Family Name: "AI-qa-evaluator-task" -> Launch Type: "AWS Fargate" -> OS: Linux/X86_64 -> Leave CPU-Memory to default -> Task Execution Role(ecsTaskExecutionRole) - AWS usually creates this automatically. -> Container Configuration (Name: "qa-evaluator-container" | Image URI: "02086615XXXX.dkr.ecr.us-east-1.amazonaws.com/qa-evaluator-app:latest") -> Port Mapping (Container Port - 8000, Protocol - TCP) -> Hit create to create Task Definition
+
+24. Create ECS Service & Run the Container - Goal is to launch our container on AWS Fargate and make it continuously running.
+
+This is where:
+- our Docker image
+- our task definition
+- our cluster
+All finally come together.
+
+** Task VS Service **
+Task <<=>> One running container instance
+Service <<=>> Keeps tasks alive automatically
+
+***What We Will Do***
+- Create ECS service
+- Attach task definition
+- Configure networking
+- Assign public IP
+- Launch running container
+
+Open your ECS cluster(qa-evaluator-cluster) -> 
+Create Service -> [Go to: Services -> Click "Create" -> ]
+Deployment Configuration -> [Choose: "Fargate" -> Choose Task Definition Family as: "AI-qa-evaluator-task" -> Revision: LATEST -> Service Name -> qa-evaluator-service -> Desired Tasks Set: 1(means one running container) -> Default VPC & Subnet Settings -> Create new Security Group -> Type: Custom TCP -> Port: 8000 -> Source: 0.0.0.0/0 (Allows internet traffic to reach container on port 8000)]
+Public IP: Enable -> No Load Balancer for now -> Hit "Create"
+Verify Task Running -> Check inside cluster, it should be running -> Find public IP & -> http://PUBLIC_IP:8000/docs
+
+
+http://52.23.152.130:8000/docs
+**********************************************************************************************************
+
+25. Application Load Balancer (Recommended)
+Right now:
+- task public IP may change
+- direct container access is not production ideal
+
+Load Balancer gives:
+- stable endpoint
+- traffic routing
+- health checks
+- scalability foundation
+
+This is VERY important industry-wise.
+
+***What We Will Do***
+- Create Application Load Balancer
+- Create Target Group
+- Register ECS tasks
+- Attach ALB to ECS service
+- Test stable endpoint
+
+
+Go to: Load Balancer on AWS EC2 Console -> Choose Load Balancer Type as "Application Load Balancer" then hit "Create" 
+**Basic Configuration** -> Name: "qa-evaluator-alb" -> Scheme: "Internet-facing" -> IP Address Type: "IPv4" -> 
+**Network Mapping** -> Default VPC -> Select all available subnets -> Security Group (Type: HTTP, Port: 80, Source: 0.0.0.0/0) -> "This means: Internet users can reach the Load Balancer on HTTP port 80"
+**Security Group** -> Use "qa-evaluator-sg" eg existing SG for project
+**Open new tab to create Target Group** -> Click: "create target group" -> (target type: IP addresses, Target Group Name: qa-evaluator-target-group, Protocol: HTTP, Port: 8000, VPC: default VPC, Health Check Path: /) -> Create -> Return to prev tab and select new TG
+
+**********************************************************************************************************
+
+26. Now we need to connect ECS service to the ALB
+Go to AWS ECS console & open "qa-evaluator-cluster" -> Go to services & open "qa-evaluator-service" -> Click "Update" to update the service -> Go to Load Balancing Section & [Enable: Use load balancing] or [choose: Application Load Balancer]
+
+Configure These EXACT Settings:
+- Load Balancer Type <<=>> Application Load Balancer
+- Load Balancer Name <<=>> qa-evaluator-alb
+- Listener <<=>> HTTP:80
+- Target Group <<=>> qa-evaluator-target-group
+- Container Name	qa-evaluator-container
+- Container Port	8000
+
+Continue the Update, keep everything else same & then hit: "Update Service"
+
+**Now ECS will**:
+- redeploy task
+- attach it to target group
+- register task IP
+- ALB starts health checks
+- This may take: 2–5 minutes
+
+Verify Health: Go to EC2 console -> Target Groups -> Open "qa-evaluator-target-group" -> Go to: Targets -> You should see: "healthy"
+
+Final Testing: EC2 console -> Load balancers -> open "qa-evaluator-alb" -> copy DNS name -> try "http://YOUR_ALB_DNS/docs"
